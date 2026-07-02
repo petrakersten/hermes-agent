@@ -3330,7 +3330,7 @@ def systemd_status(deep: bool = False, system: bool = False, full: bool = False)
     if not systemd_unit_is_current(system=system):
         print("⚠ Installed gateway service definition is outdated")
         print(
-            f"  Run: {'sudo ' if system else ''}hermes gateway restart{scope_flag}  # auto-refreshes the unit"
+            f"  Run: {'sudo /home/hermes/.local/bin/' if system else ''}hermes gateway restart{scope_flag}  # auto-refreshes the unit"
         )
         print()
 

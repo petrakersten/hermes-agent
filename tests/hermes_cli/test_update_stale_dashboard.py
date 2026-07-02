@@ -299,6 +299,45 @@ class TestKillStaleDashboardPosix:
         out = capsys.readouterr().out
         assert "✓ stopped PID 99999" in out
 
+    def test_update_restart_safe_loopback_dashboard_after_kill(self, capsys):
+        """`hermes update` restarts browser dashboards on loopback after reaping stale code."""
+        def fake_kill(pid, sig):
+            if sig == 0:
+                raise ProcessLookupError
+
+        with patch("hermes_cli.main._find_stale_dashboard_pids",
+                   return_value=[12345]), \
+             patch("hermes_cli.main._dashboard_restart_specs",
+                   return_value=[("127.0.0.1", "9119")]) as mock_specs, \
+             patch("hermes_cli.main._restart_dashboard_specs") as mock_restart, \
+             patch("os.kill", side_effect=fake_kill), \
+             patch("time.sleep"):
+            _kill_stale_dashboard_processes()
+
+        mock_specs.assert_called_once_with([12345])
+        mock_restart.assert_called_once_with([("127.0.0.1", "9119")])
+        out = capsys.readouterr().out
+        assert "Restarting dashboard with a safe loopback bind" in out
+
+    def test_stop_flag_does_not_restart_dashboard(self, capsys):
+        """`hermes dashboard --stop` uses the same kill path but must not respawn."""
+        def fake_kill(pid, sig):
+            if sig == 0:
+                raise ProcessLookupError
+
+        with patch("hermes_cli.main._find_stale_dashboard_pids",
+                   return_value=[12345]), \
+             patch("hermes_cli.main._dashboard_restart_specs") as mock_specs, \
+             patch("hermes_cli.main._restart_dashboard_specs") as mock_restart, \
+             patch("os.kill", side_effect=fake_kill), \
+             patch("time.sleep"):
+            _kill_stale_dashboard_processes(reason="requested via --stop", restart=False)
+
+        mock_specs.assert_not_called()
+        mock_restart.assert_not_called()
+        out = capsys.readouterr().out
+        assert "Restarting dashboard" not in out
+
     def test_permission_error_is_reported_not_raised(self, capsys):
         """os.kill raising PermissionError (e.g. another user's process)
         must not abort hermes update — it's reported as a failure and we

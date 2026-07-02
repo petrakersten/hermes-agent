@@ -5788,6 +5788,35 @@ def cmd_gui(args: argparse.Namespace):
     sys.exit(launch_result.returncode)
 
 
+def _argv_is_dashboard_server(argv: list[str]) -> bool:
+    """Return True when argv is a long-lived ``dashboard``/``serve`` server."""
+    if not argv:
+        return False
+    for i, arg in enumerate(argv):
+        if arg not in {"dashboard", "serve"}:
+            continue
+        # Lifecycle/status commands are short-lived CLI operations, not the
+        # long-running server we need to reap after update.  This also prevents
+        # killing wrapper shells whose command text merely contains
+        # ``hermes dashboard --status`` later in a script.
+        tail = argv[i + 1 :]
+        if any(flag in tail for flag in {"--status", "--stop"}):
+            return False
+        if arg == "dashboard" and tail[:1] == ["register"]:
+            return False
+        return True
+    return False
+
+
+def _read_process_argv(pid: int) -> list[str]:
+    """Best-effort argv read for a local process."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "ignore")
+    except (OSError, ValueError):
+        return []
+    return [part for part in raw.split("\0") if part]
+
+
 def _find_stale_dashboard_pids(
     *,
     exclude_pids: set[int] | None = None,
@@ -5897,7 +5926,17 @@ def _find_stale_dashboard_pids(
                     except ValueError:
                         continue
                     command = parts[1]
-                    if any(p in command for p in patterns) and pid != self_pid:
+                    argv = _read_process_argv(pid)
+                    if argv:
+                        if _argv_is_dashboard_server(argv) and pid != self_pid:
+                            dashboard_pids.append(pid)
+                    elif (
+                        any(p in command for p in patterns)
+                        and "--status" not in command
+                        and "--stop" not in command
+                        and "dashboard register" not in command
+                        and pid != self_pid
+                    ):
                         dashboard_pids.append(pid)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return []
@@ -5905,6 +5944,80 @@ def _find_stale_dashboard_pids(
     if exclude_pids:
         dashboard_pids = [p for p in dashboard_pids if p not in exclude_pids]
     return dashboard_pids
+
+
+def _dashboard_restart_specs(pids: list[int]) -> list[tuple[str, str]]:
+    """Return safe ``(host, port)`` restart specs for stale dashboard PIDs.
+
+    ``hermes update`` used to stop the stale dashboard and leave the operator
+    to restart it. That avoided guessing at launch args, but it also left
+    unattended/headless installs on an old dashboard until someone noticed.
+    Restart only the browser dashboard (not ``serve`` / desktop backends), use
+    the same port, and force loopback unless the old command was already a
+    loopback bind. This preserves local dashboards and safely handles the June
+    2026 hardening where ``--insecure`` no longer permits unauthenticated
+    ``0.0.0.0`` binds.
+    """
+    specs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for pid in pids:
+        argv = _read_process_argv(pid)
+        if "dashboard" not in argv:
+            # ``serve`` is also reaped as stale backend state, but it is usually
+            # desktop-managed and should not be resurrected as a browser UI.
+            continue
+        host = "127.0.0.1"
+        port = "9119"
+        for i, arg in enumerate(argv):
+            if arg == "--host" and i + 1 < len(argv):
+                old_host = argv[i + 1]
+                if old_host in {"127.0.0.1", "localhost", "::1"}:
+                    host = old_host
+            elif arg.startswith("--host="):
+                old_host = arg.split("=", 1)[1]
+                if old_host in {"127.0.0.1", "localhost", "::1"}:
+                    host = old_host
+            elif arg == "--port" and i + 1 < len(argv):
+                port = argv[i + 1]
+            elif arg.startswith("--port="):
+                port = arg.split("=", 1)[1]
+        spec = (host, port)
+        if spec not in seen:
+            seen.add(spec)
+            specs.append(spec)
+    return specs
+
+
+def _restart_dashboard_specs(specs: list[tuple[str, str]]) -> None:
+    """Start dashboard processes after an update using safe loopback binds."""
+    for host, port in specs:
+        cmd = [
+            sys.executable,
+            "-m",
+            "hermes_cli.main",
+            "dashboard",
+            "--host",
+            host,
+            "--port",
+            port,
+            "--no-open",
+            "--skip-build",
+        ]
+        try:
+            log_path = get_hermes_home() / "logs" / "dashboard.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_fh = log_path.open("ab")
+            subprocess.Popen(
+                cmd,
+                cwd=PROJECT_ROOT,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
+            print(f"    ↻ restarted dashboard at http://{host}:{port}")
+        except Exception as exc:
+            print(f"    ⚠ failed to restart dashboard on {host}:{port}: {exc}")
 
 
 def _print_curator_first_run_notice() -> None:
@@ -6036,6 +6149,8 @@ def _format_time_ago(iso_ts: str) -> str:
 
 def _kill_stale_dashboard_processes(
     reason: str = "the running backend no longer matches the updated frontend",
+    *,
+    restart: bool = True,
 ) -> None:
     """Kill running ``hermes dashboard`` processes.
 
@@ -6078,6 +6193,7 @@ def _kill_stale_dashboard_processes(
     pids = _find_stale_dashboard_pids(exclude_pids=exclude)
     if not pids:
         return
+    restart_specs = _dashboard_restart_specs(pids) if restart else []
 
     print()
     print(f"⟲ Stopping {len(pids)} dashboard process(es) ({reason})")
@@ -6149,8 +6265,12 @@ def _kill_stale_dashboard_processes(
         print(f"    ✗ failed to stop PID {pid}: {err_msg}")
 
     if killed:
-        print("  Restart the dashboard when you're ready:")
-        print("    hermes dashboard --port <port>")
+        if restart_specs:
+            print("  Restarting dashboard with a safe loopback bind:")
+            _restart_dashboard_specs(restart_specs)
+        else:
+            print("  Restart the dashboard when you're ready:")
+            print("    hermes dashboard --port <port>")
 
 
 # Back-compat alias: some tests and any external callers may import the old
@@ -10034,6 +10154,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 _get_service_pids,
                 _graceful_restart_via_sigusr1,
                 _wait_for_gateway_exit,
+                get_systemd_unit_path,
+                refresh_systemd_unit_if_needed,
+                systemd_unit_is_current,
             )
             import signal as _signal
 
@@ -10269,6 +10392,40 @@ def _cmd_update_impl(args, gateway_mode: bool):
                             _manage_cmd = _resolve_manage_cmd(
                                 scope, scope_cmd, svc_name
                             )
+
+                            # Refresh the installed unit before restarting.
+                            # `hermes gateway restart` already does this, but
+                            # `hermes update` used to hand-roll the restart
+                            # path and could leave `gateway status` warning that
+                            # the service definition was outdated immediately
+                            # after a successful update.
+                            try:
+                                _unit_path = get_systemd_unit_path(system=(scope == "system"))
+                                _unit_outdated = _unit_path.exists() and not systemd_unit_is_current(system=(scope == "system"))
+                                if _unit_outdated:
+                                    if scope == "system" and hasattr(os, "geteuid") and os.geteuid() != 0:
+                                        _sudo_hermes = "/home/hermes/.local/bin/hermes"
+                                        _sudo_restart = subprocess.run(
+                                            ["sudo", _sudo_hermes, "gateway", "restart", "--system"],
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=150,
+                                        )
+                                        if _sudo_restart.returncode == 0:
+                                            restarted_services.append(svc_name)
+                                            print(
+                                                f"  ✓ {svc_name}: service definition refreshed via sudo {_sudo_hermes}"
+                                            )
+                                            continue
+                                        print(
+                                            f"  ⚠ {svc_name}: service definition is outdated; "
+                                            "refresh requires root. Run:\n"
+                                            f"      sudo {_sudo_hermes} gateway restart --system"
+                                        )
+                                    elif refresh_systemd_unit_if_needed(system=(scope == "system")):
+                                        print(f"  ✓ {svc_name}: service definition refreshed")
+                            except Exception as _unit_exc:
+                                print(f"  ⚠ {svc_name}: could not refresh service definition: {_unit_exc}")
 
                             # Prefer a graceful SIGUSR1 restart so in-flight
                             # agent runs drain instead of being SIGKILLed.
@@ -10690,11 +10847,12 @@ def _cmd_update_impl(args, gateway_mode: bool):
         except Exception as e:
             logger.debug("Legacy unit check during update failed: %s", e)
 
-        # Kill stale dashboard processes — the dashboard has no service
-        # manager, so leaving it alive after a code update produces a
-        # silent frontend/backend mismatch.  We can't auto-restart it
-        # (no saved launch args) but we can stop it, and a hint is
-        # printed for the user to re-launch.
+        # Recycle stale dashboard processes — the dashboard has no service
+        # manager, so leaving it alive after a code update produces a silent
+        # frontend/backend mismatch.  Browser dashboards are restarted on a
+        # safe loopback bind so headless installs do not keep serving the old UI;
+        # desktop/headless ``serve`` backends are only stopped because their
+        # owner is responsible for relaunching them.
         _kill_stale_dashboard_processes()
 
         print()
@@ -11645,7 +11803,7 @@ def cmd_dashboard(args):
             print("No hermes dashboard processes running.")
             sys.exit(0)
         # Reuse the same SIGTERM-grace-SIGKILL path used after `hermes update`.
-        _kill_stale_dashboard_processes(reason="requested via --stop")
+        _kill_stale_dashboard_processes(reason="requested via --stop", restart=False)
         # _kill_stale_dashboard_processes prints outcomes itself.  Exit 0 if
         # we killed at least one, 1 if they were all unkillable.
         remaining = _find_stale_dashboard_pids()
