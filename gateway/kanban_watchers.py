@@ -38,14 +38,17 @@ def _human_gate_field(reason: str, label: str) -> str:
 
 
 def _human_gate_reply(reason: str) -> str:
-    """Extract the shortest explicit reply, preferring inline code."""
-    candidates = re.findall(r"`([^`\n]{1,300})`", reason)
-    if candidates:
-        return min((c.strip() for c in candidates if c.strip()), key=len)
+    """Extract the explicit reply, preferring the structured Afterward field."""
     afterward = _human_gate_field(reason, "Afterward")
+    explicit = re.search(r"`([^`\n]{1,300})`", afterward)
+    if explicit and explicit.group(1).strip():
+        return explicit.group(1).strip()
     match = re.search(r"\breply\s+(?:with\s+)?[\"']?(.+?)[\"']?(?:[.;]|$)", afterward, re.I)
     if match:
         return match.group(1).strip()
+    candidates = re.findall(r"`([^`\n]{1,300})`", reason)
+    if candidates:
+        return min((c.strip() for c in candidates if c.strip()), key=len)
     action = _human_gate_field(reason, "Please do")
     return action[:300] or "Reply with the requested decision or evidence"
 
@@ -56,7 +59,7 @@ def _format_discord_human_gate(task: Any, task_id: str, payload: dict, *, triage
     reply = _human_gate_reply(reason)
     why = _human_gate_field(reason, "Please do") or _human_gate_field(reason, "Blocked on")
     verified = _human_gate_field(reason, "Already verified") or "No prior verification was recorded."
-    title = (getattr(task, "title", None) or task_id).strip()[:120]
+    title = (getattr(task, "title", None) or task_id).strip()[:240]
     if triage:
         next_step = (
             "This task is in TRIAGE after repeated same-cause blockers. "
@@ -68,14 +71,30 @@ def _format_discord_human_gate(task: Any, task_id: str, payload: dict, *, triage
             "Hermes will attach your reply to this exact task, unblock it, and resume automatically. "
             "Replying in Discord is enough; no CLI or dashboard action is required."
         )
-    card = (
+    # Build required actionable content first, then spend the remaining Discord
+    # budget on secondary evidence. Never blind-slice the completed card: that
+    # could remove the automatic-next-step contract from a long notification.
+    prefix = (
         f"Action needed — {title} ({task_id})\n"
         f"Reply in this thread with:\n`{reply}`\n\n"
-        f"Why: {why[:350]}\n"
-        f"Already verified: {verified[:350]}\n"
-        f"What happens automatically next: {next_step}"
     )
-    return card[:1950]
+    suffix = f"\nWhat happens automatically next: {next_step}"
+    evidence_budget = max(0, 1950 - len(prefix) - len(suffix))
+    why_budget = evidence_budget // 2
+    verified_budget = evidence_budget - why_budget
+
+    def _bounded_field(label: str, value: str, budget: int) -> str:
+        field_prefix = f"{label}: "
+        if budget <= len(field_prefix):
+            return ""
+        value_budget = budget - len(field_prefix) - 1  # trailing newline
+        if len(value) > value_budget:
+            value = value[: max(0, value_budget - 1)].rstrip() + "…"
+        return f"{field_prefix}{value}\n"
+
+    evidence = _bounded_field("Why", why, why_budget)
+    evidence += _bounded_field("Already verified", verified, verified_budget)
+    return prefix + evidence + suffix
 
 
 def _route_discord_human_gate_reply(source: Any, text: str) -> Optional[str]:

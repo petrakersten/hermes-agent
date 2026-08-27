@@ -1,11 +1,14 @@
 import asyncio
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 
 from gateway.config import Platform
 from gateway.kanban_watchers import (
     _acquire_singleton_lock,
+    _format_discord_human_gate,
+    _human_gate_reply,
     _release_singleton_lock,
     _route_discord_human_gate_reply,
 )
@@ -661,6 +664,40 @@ def test_discord_needs_input_is_an_actionable_multiline_card(tmp_path, monkeypat
     assert "What happens automatically next:" in text
     assert "Hermes will attach your reply to this exact task, unblock it, and resume automatically." in text
     assert "/very/long/internal/path" not in text
+
+
+def test_human_gate_reply_prefers_explicit_afterward_over_shorter_code_span():
+    reason = (
+        "Blocked on: grant `rw` to the release principal.\n"
+        "Please do: approve the production release.\n"
+        "Afterward: reply `Production release approved for version 1.2.3`; work resumes."
+    )
+
+    assert _human_gate_reply(reason) == "Production release approved for version 1.2.3"
+
+
+def test_discord_human_gate_preserves_action_fields_at_message_boundary():
+    exact_reply = "Approve production release 1.2.3"
+    reason = (
+        f"Please do: {'approve the bounded release evidence ' * 100}.\n"
+        f"Already verified: {'tests staging rollback and audit passed ' * 100}.\n"
+        f"Afterward: reply `{exact_reply}`; the task resumes automatically."
+    )
+
+    text = _format_discord_human_gate(
+        SimpleNamespace(title="Production release " + "with a long title " * 30),
+        "t_boundary",
+        {"reason": reason},
+        triage=False,
+    )
+
+    assert 1800 <= len(text) <= 1950
+    assert f"Reply in this thread with:\n`{exact_reply}`" in text
+    assert "Why:" in text
+    assert "Already verified:" in text
+    assert "What happens automatically next:" in text
+    assert "Hermes will attach your reply to this exact task, unblock it, and resume automatically." in text
+    assert text.endswith("Replying in Discord is enough; no CLI or dashboard action is required.")
 
 
 def test_discord_triage_card_preserves_action_and_explains_respec(tmp_path, monkeypatch):
