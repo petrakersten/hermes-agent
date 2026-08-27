@@ -7,6 +7,7 @@ from gateway.config import Platform
 from gateway.kanban_watchers import (
     _acquire_singleton_lock,
     _release_singleton_lock,
+    _route_discord_human_gate_reply,
 )
 from gateway.run import GatewayRunner
 from hermes_cli import kanban_db as kb
@@ -44,10 +45,10 @@ async def _run_one_notifier_tick(monkeypatch, runner):
     await runner._kanban_notifier_watcher(interval=1)
 
 
-def _make_runner(adapter):
+def _make_runner(adapter, platform=Platform.TELEGRAM):
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._running = True
-    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner.adapters = {platform: adapter}
     runner._kanban_sub_fail_counts = {}
     # Most tests model the default gateway after its dispatcher acquired the
     # singleton lock. Tests for startup or non-owner gateways clear this.
@@ -622,6 +623,106 @@ def test_notifier_delivers_block_loop_detected_triage_ping(tmp_path, monkeypatch
     finally:
         conn.close()
     assert remaining == []
+
+
+def test_discord_needs_input_is_an_actionable_multiline_card(tmp_path, monkeypatch):
+    db_path = tmp_path / "discord-human-gate.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="Publish release", assignee="worker")
+        kb.add_notify_sub(
+            conn, task_id=tid, platform="discord", chat_id="thread-7",
+            thread_id="thread-7",
+        )
+        kb.block_task(
+            conn, tid,
+            reason=(
+                "Blocked on: release approval at /very/long/internal/path/that/must/not/lead.\n"
+                "Please do: approve release 1.2.3.\n"
+                "Already verified: tests and staging passed.\n"
+                "Afterward: reply `Approve release 1.2.3`; the task resumes automatically."
+            ),
+            kind="needs_input",
+        )
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter, Platform.DISCORD)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    text = adapter.sent[0]["text"]
+    assert text.startswith(f"Action needed — Publish release ({tid})")
+    assert "\nReply in this thread with:\n`Approve release 1.2.3`" in text
+    assert text.index("Reply in this thread with:") < text.index("Why:")
+    assert "Already verified: tests and staging passed." in text
+    assert "What happens automatically next:" in text
+    assert "Hermes will attach your reply to this exact task, unblock it, and resume automatically." in text
+    assert "/very/long/internal/path" not in text
+
+
+def test_discord_triage_card_preserves_action_and_explains_respec(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "discord-triage.db"))
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="Choose deployment", assignee="worker")
+        kb.add_notify_sub(conn, task_id=tid, platform="discord", chat_id="thread-8")
+        kb._append_event(
+            conn, tid, "block_loop_detected",
+            {"reason": "Please do: choose blue. Afterward: reply `Use blue`.",
+             "kind": "needs_input", "recurrences": 2,
+             "limit": kb.BLOCK_RECURRENCE_LIMIT},
+        )
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter, Platform.DISCORD)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+    text = adapter.sent[0]["text"]
+    assert text.startswith(f"Action needed — Choose deployment ({tid})")
+    assert "`Use blue`" in text
+    assert "TRIAGE" in text
+    assert "A reply alone will not resume this repeatedly blocked task" in text
+
+
+def test_discord_thread_reply_updates_and_unblocks_only_exact_task(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "discord-reply.db"))
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        exact = kb.create_task(conn, title="Exact gate", assignee="worker")
+        other = kb.create_task(conn, title="Other gate", assignee="worker")
+        for tid, thread in ((exact, "thread-1"), (other, "thread-2")):
+            kb.add_notify_sub(
+                conn, task_id=tid, platform="discord", chat_id="parent",
+                thread_id=thread,
+            )
+            kb.block_task(conn, tid, reason="Reply `Approved`", kind="needs_input")
+    finally:
+        conn.close()
+
+    class Source:
+        chat_id = "thread-1"
+        thread_id = "thread-1"
+        user_id = "tim-7"
+        user_name = "Tim"
+
+    reply = _route_discord_human_gate_reply(Source(), "Approved")
+    assert reply == f"Attached your reply to {exact}; Hermes unblocked it and will resume automatically."
+
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, exact).status == "ready"
+        assert kb.get_task(conn, other).status == "blocked"
+        comments = kb.list_comments(conn, exact)
+        assert comments[-1].body == "Approved"
+        assert comments[-1].author == "discord:tim-7"
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

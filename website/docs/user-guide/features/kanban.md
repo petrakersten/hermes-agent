@@ -1010,6 +1010,12 @@ Coverage window: desktop notifications ride the live event stream, so they fire 
 
 When you run `/kanban create …` from the gateway (Telegram, Discord, Slack, etc.), the originating chat is automatically subscribed to the new task. The gateway's background notifier polls `task_events` every few seconds and delivers one message per terminal event (`completed`, `blocked`, `gave_up`, `crashed`, `timed_out`) to that chat. Completed tasks also send the first line of the worker's `--result` so you see the outcome without having to `/kanban show`.
 
+### Replying to Discord human gates
+
+A Discord `needs_input` notification is an actionable multiline card. It puts the shortest requested response immediately below **Reply in this thread with**, before the reason and verification details. Reply in that same Discord thread with the requested text: Hermes attaches the reply as a comment on the exact subscribed task, unblocks it, and resumes dispatch automatically. You do not need the dashboard or `/kanban unblock`.
+
+If repeated same-cause blockers have moved the task to `triage`, the card still preserves the requested response but says that the reply will be attached for re-specification rather than immediately unblocking the task. This prevents an automatic unblock loop while keeping the human action visible.
+
 You can manage subscriptions explicitly from the CLI — useful when a script / cron job wants to notify a chat it didn't originate from:
 
 ```bash

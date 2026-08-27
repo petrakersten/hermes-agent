@@ -27,6 +27,125 @@ from agent.i18n import t
 logger = logging.getLogger("gateway.run")
 
 
+def _human_gate_field(reason: str, label: str) -> str:
+    """Return one compact labelled field from a structured blocker reason."""
+    match = re.search(
+        rf"(?:^|\n){re.escape(label)}:\s*(.+?)(?=\n[A-Z][^\n:]*:|$)",
+        reason,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return " ".join(match.group(1).strip().split()) if match else ""
+
+
+def _human_gate_reply(reason: str) -> str:
+    """Extract the shortest explicit reply, preferring inline code."""
+    candidates = re.findall(r"`([^`\n]{1,300})`", reason)
+    if candidates:
+        return min((c.strip() for c in candidates if c.strip()), key=len)
+    afterward = _human_gate_field(reason, "Afterward")
+    match = re.search(r"\breply\s+(?:with\s+)?[\"']?(.+?)[\"']?(?:[.;]|$)", afterward, re.I)
+    if match:
+        return match.group(1).strip()
+    action = _human_gate_field(reason, "Please do")
+    return action[:300] or "Reply with the requested decision or evidence"
+
+
+def _format_discord_human_gate(task: Any, task_id: str, payload: dict, *, triage: bool) -> str:
+    """Render a Discord-safe human gate with the executable action first."""
+    reason = str(payload.get("reason") or "Human input is required.")
+    reply = _human_gate_reply(reason)
+    why = _human_gate_field(reason, "Please do") or _human_gate_field(reason, "Blocked on")
+    verified = _human_gate_field(reason, "Already verified") or "No prior verification was recorded."
+    title = (getattr(task, "title", None) or task_id).strip()[:120]
+    if triage:
+        next_step = (
+            "This task is in TRIAGE after repeated same-cause blockers. "
+            "A reply alone will not resume this repeatedly blocked task; Hermes will attach it "
+            "to the exact task for re-specification before work resumes."
+        )
+    else:
+        next_step = (
+            "Hermes will attach your reply to this exact task, unblock it, and resume automatically. "
+            "Replying in Discord is enough; no CLI or dashboard action is required."
+        )
+    card = (
+        f"Action needed — {title} ({task_id})\n"
+        f"Reply in this thread with:\n`{reply}`\n\n"
+        f"Why: {why[:350]}\n"
+        f"Already verified: {verified[:350]}\n"
+        f"What happens automatically next: {next_step}"
+    )
+    return card[:1950]
+
+
+def _route_discord_human_gate_reply(source: Any, text: str) -> Optional[str]:
+    """Attach a Discord thread reply to its one blocked subscription and resume it.
+
+    Returns a user-facing acknowledgement when consumed, otherwise ``None`` so
+    ordinary Discord conversation handling continues unchanged.
+    """
+    reply = (text or "").strip()
+    if not reply or reply.startswith("/"):
+        return None
+    from hermes_cli import kanban_db as kb
+
+    chat_id = str(getattr(source, "chat_id", "") or "")
+    thread_id = str(getattr(source, "thread_id", "") or "")
+    route_ids = {value for value in (chat_id, thread_id) if value}
+    if not route_ids:
+        return None
+    try:
+        boards = kb.list_boards(include_archived=False)
+    except Exception:
+        boards = [{"slug": kb.DEFAULT_BOARD}]
+    seen_paths: set[str] = set()
+    matches: list[tuple[Any, Any, str]] = []
+    for board_meta in boards:
+        slug = board_meta.get("slug") or kb.DEFAULT_BOARD
+        path = str(board_meta.get("db_path") or kb.kanban_db_path(slug))
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        conn = kb.connect(board=slug)
+        try:
+            for sub in kb.list_notify_subs(conn):
+                if str(sub.get("platform") or "").lower() != "discord":
+                    continue
+                sub_thread = str(sub.get("thread_id") or "")
+                sub_chat = str(sub.get("chat_id") or "")
+                # A thread-scoped subscription must match that exact thread.
+                # Never let its shared parent channel match several gates.
+                if sub_thread:
+                    if sub_thread not in route_ids:
+                        continue
+                elif sub_chat not in route_ids:
+                    continue
+                task = kb.get_task(conn, sub["task_id"])
+                if task and task.status in {"blocked", "triage"} and task.block_kind == "needs_input":
+                    matches.append((task, board_meta, slug))
+        finally:
+            conn.close()
+    if len(matches) != 1:
+        return None
+    task, _board_meta, slug = matches[0]
+    conn = kb.connect(board=slug)
+    try:
+        current = kb.get_task(conn, task.id)
+        if current is None or current.status not in {"blocked", "triage"}:
+            return None
+        author_id = getattr(source, "user_id", None) or getattr(source, "user_name", None) or "user"
+        kb.add_comment(conn, task.id, f"discord:{author_id}", reply)
+        if current.status == "triage":
+            return (
+                f"Attached your reply to {task.id}. It remains in TRIAGE for re-specification; "
+                "Hermes will resume it when that review clears."
+            )
+        kb.unblock_task(conn, task.id)
+    finally:
+        conn.close()
+    return f"Attached your reply to {task.id}; Hermes unblocked it and will resume automatically."
+
+
 _LOCAL_PATH_RE = re.compile(
     r"(?<![\w:/])(?:/(?:Users|home|private|tmp|var|etc|workspace)/[^\s,;]+|"
     r"[A-Za-z]:\\[^\s,;]+)"
@@ -603,10 +722,19 @@ class GatewayKanbanWatchersMixin:
                                 f" — {title}{handoff}"
                             )
                         elif kind == "blocked":
-                            reason = ""
-                            if ev.payload and ev.payload.get("reason"):
-                                reason = f": {str(ev.payload['reason'])[:160]}"
-                            msg = f"⏸ {board_tag}{tag}Kanban {sub['task_id']} blocked{reason}"
+                            if (
+                                platform_str == "discord"
+                                and ev.payload
+                                and ev.payload.get("kind") == "needs_input"
+                            ):
+                                msg = _format_discord_human_gate(
+                                    task, sub["task_id"], ev.payload, triage=False,
+                                )
+                            else:
+                                reason = ""
+                                if ev.payload and ev.payload.get("reason"):
+                                    reason = f": {str(ev.payload['reason'])[:160]}"
+                                msg = f"⏸ {board_tag}{tag}Kanban {sub['task_id']} blocked{reason}"
                         elif kind == "gave_up":
                             err = ""
                             if ev.payload and ev.payload.get("error"):
@@ -676,17 +804,22 @@ class GatewayKanbanWatchersMixin:
                             # `blocked`/`status` event — so before adding it to
                             # TERMINAL_KINDS it produced zero notification and
                             # the task stalled in triage silently. Ping loudly.
-                            reason = ""
-                            recurrences = None
-                            if ev.payload:
-                                if ev.payload.get("reason"):
-                                    reason = f": {str(ev.payload['reason'])[:160]}"
-                                recurrences = ev.payload.get("recurrences")
-                            rc = f" (blocked {recurrences}x for the same cause)" if recurrences else ""
-                            msg = (
-                                f"🛑 {board_tag}{tag}Kanban {sub['task_id']} routed to TRIAGE"
-                                f" — needs a human decision{rc}{reason}"
-                            )
+                            if platform_str == "discord" and ev.payload:
+                                msg = _format_discord_human_gate(
+                                    task, sub["task_id"], ev.payload, triage=True,
+                                )
+                            else:
+                                reason = ""
+                                recurrences = None
+                                if ev.payload:
+                                    if ev.payload.get("reason"):
+                                        reason = f": {str(ev.payload['reason'])[:160]}"
+                                    recurrences = ev.payload.get("recurrences")
+                                rc = f" (blocked {recurrences}x for the same cause)" if recurrences else ""
+                                msg = (
+                                    f"🛑 {board_tag}{tag}Kanban {sub['task_id']} routed to TRIAGE"
+                                    f" — needs a human decision{rc}{reason}"
+                                )
                         else:
                             # archived / unblocked are claimed by TERMINAL_KINDS
                             # (so the cursor advances past them and they can't

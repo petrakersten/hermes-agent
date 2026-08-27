@@ -17216,6 +17216,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
 
+        # A reply in the exact Discord thread where a needs-input Kanban card
+        # was delivered is itself the unblock action. Consume it before pause,
+        # command, or agent-turn handling so users never need CLI/dashboard
+        # knowledge and the text cannot drift into an unrelated session.
+        if not is_internal and source.platform == Platform.DISCORD:
+            try:
+                from gateway.kanban_watchers import _route_discord_human_gate_reply
+
+                _gate_ack = await asyncio.to_thread(
+                    _route_discord_human_gate_reply, source, event.text or "",
+                )
+            except Exception:
+                logger.warning("Discord Kanban reply routing failed", exc_info=True)
+                _gate_ack = None
+            if _gate_ack:
+                return _gate_ack
+
         # Global emergency stop (`hermes pause`): give new turns a brief
         # paused notice instead of starting an agent run. Internal events
         # (background-process completions from IN-FLIGHT work) bypass the
