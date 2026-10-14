@@ -21,8 +21,8 @@ def _edge_tts_pin():
 def test_edge_tts_extra_pin_clears_the_drm_rotation():
     pin = _edge_tts_pin()
     version = pin.split("==", 1)[1]
-    assert tuple(int(part) for part in version.split(".")) >= (7, 3, 0), (
-        "edge-tts < 7.3.0 403s on every synthesis after Microsoft's "
-        "2026-10-12 Sec-MS-GEC token rotation (#137944)"
+    assert tuple(int(part) for part in version.split(".")) >= (7, 3, 1), (
+        "edge-tts < 7.3.1 lacks the complete Sec-MS-GEC v2 repair "
+        "for the 2026-10-12 token rotation (#137944)"
     )
 

@@ -1631,7 +1631,7 @@ wheels = [
 
 [[package]]
 name = "edge-tts"
-version = "7.3.0"
+version = "7.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -1639,9 +1639,9 @@ dependencies = [
     { name = "tabulate" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/dd/e3/4c7694643c3d244977a9d62ddececf574aca9a61a48284ad968647f133a4/edge_tts-7.3.0.tar.gz", hash = "sha256:e6c3e7a62439f3a1567bc20aa704b2aadd4acd6afb3cd539fbe65b7c1a9e7c82", size = 35792, upload-time = "2026-10-13T15:33:48.03Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a3/ce/14e713ba774063e00444a091eb790539fe0d848a9d8df35fd81a7639a28e/edge_tts-7.3.1.tar.gz", hash = "sha256:ee1fabf911b9ea83b38ae93aee5619ee41eaf0b109fef6e65d797dc4ebf1f20f", size = 35843, upload-time = "2026-10-13T18:22:53.226Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/99/5a/06f5ca7f830fa1445e3a1e068b40a484a486c6af6541cf42cfe5e7a02a3a/edge_tts-7.3.0-py3-none-any.whl", hash = "sha256:31dce50bc55156b0542645e61a847249ce2a41072f6447c9729fd3f0b11834b0", size = 38894, upload-time = "2026-10-13T15:33:46.844Z" },
+    { url = "https://files.pythonhosted.org/packages/35/86/3b97d755992777d5a9ca0e45a8ec96cc9858b2d6dd8f65f3f688d60e8709/edge_tts-7.3.1-py3-none-any.whl", hash = "sha256:2a3c79d6235a7a736d681233823ce5492e829b43eb47beae49aa181237a8f9a4", size = 38908, upload-time = "2026-10-13T18:22:51.772Z" },
 ]
 
 [[package]]
@@ -2557,7 +2557,7 @@ requires-dist = [
     { name = "dingtalk-stream", marker = "extra == 'dingtalk'", specifier = "==0.24.3" },
     { name = "discord-py", extras = ["voice"], marker = "extra == 'discord'", specifier = "==2.7.1" },
     { name = "discord-py", extras = ["voice"], marker = "extra == 'messaging'", specifier = "==2.7.1" },
-    { name = "edge-tts", marker = "extra == 'edge-tts'", specifier = "==7.3.0" },
+    { name = "edge-tts", marker = "extra == 'edge-tts'", specifier = "==7.3.1" },
     { name = "elevenlabs", marker = "extra == 'tts-premium'", specifier = "==1.59.0" },
     { name = "exa-py", marker = "extra == 'exa'", specifier = "==2.10.2" },
     { name = "fal-client", marker = "extra == 'fal'", specifier = "==0.13.1" },

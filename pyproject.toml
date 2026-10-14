@@ -239,7 +239,7 @@ fal = ["fal-client==0.13.1"]
 # ElevenLabs / OpenAI / MiniMax instead). 7.3.0 fixes the Sec-MS-GEC
 # DRM handshake 403 that killed every synthesis after Microsoft's
 # token rotation (see #137944).
-edge-tts = ["edge-tts==7.3.0"]
+edge-tts = ["edge-tts==7.3.1"]
 # NeuTTS's upstream Python ceiling excludes the managed interpreter.
 # Keep dependency markers and PM gates together: bundles omit them, explicit
 # setup requests report unavailable rather than succeeding with an empty set.
@@ -636,9 +636,10 @@ override-dependencies = [
 exclude-newer = "3 days"
 # Per-package exception to the 3-day release-age quarantine (#137944):
 # Microsoft rotated the DRM token scheme (Sec-MS-GEC) on 2026-10-12 and
-# every edge-tts synthesis before 7.3.0 (published 2026-10-13) now 403s.
+# every edge-tts synthesis before 7.3.0 now 403s. Version 7.3.1 includes
+# the follow-up server-Date parsing fix and was published 2026-10-13.
 # The fix is younger than the cutoff, so it needs its own window. REMOVE
-# this entry once 7.3.0 is older than 3 days (from 2026-10-16 15:33 UTC).
+# this entry once 7.3.1 is older than 3 days (from 2026-10-16 18:23 UTC).
 exclude-newer-package = { edge-tts = "2026-10-14T00:00:00Z" }
 
 [tool.setuptools]
